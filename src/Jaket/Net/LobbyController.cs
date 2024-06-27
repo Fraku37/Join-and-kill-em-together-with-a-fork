@@ -3,49 +3,59 @@ namespace Jaket.Net;
 using Steamworks;
 using Steamworks.Data;
 using System;
-using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
-using Jaket.UI;
+using Jaket.Assets;
+using Jaket.IO;
 
-/// <summary> Lobby controller with several useful methods. </summary>
+/// <summary> Lobby controller with several useful methods and properties. </summary>
 public class LobbyController
 {
-    /// <summary> The current lobby the player is connected to. Null if the player is not connected to a lobby. </summary>
+    /// <summary> The current lobby the player is connected to. Null if the player is not connected to any lobby. </summary>
     public static Lobby? Lobby;
-    /// <summary> Lobby owner or the player's SteamID if the lobby is null. </summary>
-    public static SteamId Owner => Lobby == null ? SteamClient.SteamId : Lobby.Value.Owner.Id;
-    /// <summary> Id of the last lobby owner, needed to track the exit of the host. </summary>
+    public static bool Online => Lobby != null;
+    public static bool Offline => Lobby == null;
+
+    /// <summary> Id of the last lobby owner, needed to track the exit of the host and for other minor things. </summary>
     public static SteamId LastOwner;
-    /// <summary> Id of the last kicked player. </summary>
-    public static SteamId LastKicked;
+    /// <summary> Whether the player owns the lobby. </summary>
+    public static bool IsOwner;
 
     /// <summary> Whether a lobby is creating right now. </summary>
     public static bool CreatingLobby;
     /// <summary> Whether a list of public lobbies is being fetched right now. </summary>
     public static bool FetchingLobbies;
-    /// <summary> Whether the player owns the lobby. </summary>
-    public static bool IsOwner;
 
     /// <summary> Whether PvP is allowed in this lobby. </summary>
     public static bool PvPAllowed => Lobby?.GetData("pvp") == "True";
     /// <summary> Whether cheats are allowed in this lobby. </summary>
     public static bool CheatsAllowed => Lobby?.GetData("cheats") == "True";
+    /// <summary> Whether bosses must be healed after death in this lobby. </summary>
+    public static bool HealBosses => Lobby?.GetData("heal-bosses") == "True";
     /// <summary> Number of percentages that will be added to the boss's health for each player. </summary>
     public static float PPP;
 
     /// <summary> Scales health to increase difficulty. </summary>
-    public static void ScaleHealth(ref float health) => health *= 1f + (Lobby == null ? 0f : Lobby.Value.MemberCount - 1f) * PPP;
+    public static void ScaleHealth(ref float health) => health *= 1f + Math.Min(Lobby?.MemberCount - 1 ?? 1, 1) * PPP;
+    /// <summary> Whether the given lobby is created via Multikill. </summary>
+    public static bool IsMultikillLobby(Lobby lobby) => lobby.Data.Any(pair => pair.Key == "mk_lobby");
 
-    /// <summary> Creates the necessary listeners for proper work with a lobby. </summary>
+    /// <summary> Creates the necessary listeners for proper work. </summary>
     public static void Load()
     {
         // get the owner id when entering the lobby
         SteamMatchmaking.OnLobbyEntered += lobby =>
         {
             if (lobby.Owner.Id != 0L) LastOwner = lobby.Owner.Id;
-        };
 
+            if (lobby.GetData("banned").Contains(Tools.AccId.ToString())) LeaveLobby();
+            if (IsMultikillLobby(lobby))
+            {
+                LeaveLobby();
+                Bundle.Hud("lobby.mk");
+            }
+        };
         // and leave the lobby if the owner has left it
         SteamMatchmaking.OnLobbyMemberLeave += (lobby, member) =>
         {
@@ -53,139 +63,80 @@ public class LobbyController
         };
 
         // put the level name in the lobby data so that it can be seen in the public lobbies list
-        Events.OnLoaded += () => Lobby?.SetData("level", MapMap(SceneHelper.CurrentScene));
-
+        Events.OnLoaded += () => Lobby?.SetData("level", MapMap(Tools.Scene));
         // if the player exits to the main menu, then this is equivalent to leaving the lobby
-        Events.OnMainMenuLoaded += LeaveLobby;
+        Events.OnMainMenuLoaded += () => LeaveLobby(false);
     }
+
+    /// <summary> Is there a user with the given id among the members of the lobby. </summary>
+    public static bool Contains(uint id) => Lobby?.Members.Any(member => member.Id.AccountId == id) ?? false;
 
     #region control
 
-    /// <summary> Asynchronously creates a new lobby and connects to it. </summary>
+    /// <summary> Asynchronously creates a new lobby with default settings and connects to it. </summary>
     public static void CreateLobby()
     {
         if (Lobby != null || CreatingLobby) return;
+        Log.Debug("Creating a lobby...");
 
-        var task = SteamMatchmaking.CreateLobbyAsync(8);
         CreatingLobby = true;
-
-        task.GetAwaiter().OnCompleted(() =>
+        SteamMatchmaking.CreateLobbyAsync(8).ContinueWith(task =>
         {
-            Lobby = task.Result.Value;
-            IsOwner = true;
+            CreatingLobby = false; IsOwner = true;
+            Lobby = task.Result;
 
             Lobby?.SetJoinable(true);
             Lobby?.SetPrivate();
+            Lobby?.SetData("jaket", "true");
             Lobby?.SetData("name", $"{SteamClient.Name}'s Lobby");
-            Lobby?.SetData("level", MapMap(SceneHelper.CurrentScene));
-            Lobby?.SetData("pvp", "True"); Lobby?.SetData("cheats", "True");
-
-            CreatingLobby = false;
-            Events.OnLobbyAction.Fire();
+            Lobby?.SetData("level", MapMap(Tools.Scene));
+            Lobby?.SetData("pvp", "True"); Lobby?.SetData("cheats", "True"); Lobby?.SetData("heal-bosses", "True");
         });
     }
 
-    /// <summary> Leaves the lobby, if the player is the owner, then all other players will be thrown into the main menu. </summary>
-    public static void LeaveLobby()
+    /// <summary> Leaves the lobby. If the player is the owner, then all other players will be thrown into the main menu. </summary>
+    public static void LeaveLobby(bool loadMainMenu = true)
     {
-        // this is necessary in order to free up resources allocated for unread packets, otherwise there may be ghost players in the chat
-        if (Lobby != null)
+        Log.Debug("Leaving the lobby...");
+
+        if (Online) // free up resources allocated for packets that have not been sent
         {
             Networking.Server.Close();
             Networking.Client.Close();
+            Pointers.Free();
+
+            Lobby?.Leave();
+            Lobby = null;
         }
 
-        Lobby?.Leave();
-        Lobby = null;
+        // load the main menu if the client has left the lobby
+        if (!IsOwner && loadMainMenu) Tools.Load("Main Menu");
 
-        // if the client has left the lobby, then load the main menu
-        if (!IsOwner && SceneHelper.CurrentScene != "Main Menu") SceneHelper.LoadScene("Main Menu");
-
-        Networking.Clear(); // destroy all network objects
+        Networking.Clear();
         Events.OnLobbyAction.Fire();
     }
 
-    /// <summary> Opens a steam overlay with a selection of a friend to invite to the lobby. </summary>
+    /// <summary> Opens Steam overlay with a selection of a friend to invite to the lobby. </summary>
     public static void InviteFriend() => SteamFriends.OpenGameInviteOverlay(Lobby.Value.Id);
 
     /// <summary> Asynchronously connects the player to the given lobby. </summary>
-    public static async void JoinLobby(Lobby lobby)
+    public static void JoinLobby(Lobby lobby)
     {
-        if (Lobby?.Id == lobby.Id)
+        if (Lobby?.Id == lobby.Id) { Bundle.Hud("lobby.join-yourself"); return; }
+        Log.Debug("Joining a lobby...");
+
+        // leave the previous lobby before join the new, but don't load the main menu
+        if (Online) LeaveLobby(false);
+
+        lobby.Join().ContinueWith(task =>
         {
-            UI.SendMsg(
-@"""Why would you want to join yourself?!""
-<size=20><color=grey>(c) xzxADIxzx</color></size>");
-            return;
-        }
-
-        if (Lobby != null) LeaveLobby();
-        Debug.Log("Joining to the lobby...");
-
-        var enter = await lobby.Join();
-        if (enter == RoomEnter.Success)
-        {
-            Lobby = lobby;
-            IsOwner = false;
-        }
-        else UI.SendMsg(
-@"<size=20><color=red>Couldn't connect to the lobby, it's a shame.</color></size>
-Maybe it was closed or you were blocked ,_,");
-
-        Events.OnLobbyAction.Fire();
-    }
-
-    #endregion
-    #region members
-
-    /// <summary> Returns a list of nicknames of players currently typing. </summary>
-    public static List<string> TypingPlayers()
-    {
-        List<string> list = new();
-
-        if (Chat.Shown) list.Add("You");
-        Networking.EachPlayer(player =>
-        {
-            if (player.Typing) list.Add(player.Header.Name);
+            if (task.Result == RoomEnter.Success)
+            {
+                IsOwner = false;
+                Lobby = lobby;
+            }
+            else Log.Warning($"Couldn't join a lobby. Result is {task.Result}");
         });
-
-        return list;
-    }
-
-    public static bool Contains(SteamId id)
-    {
-        if (Lobby == null) return false;
-
-        foreach (var member in Lobby?.Members)
-            if (member.Id == id) return true;
-
-        return false;
-    }
-
-    /// <summary> Iterates each lobby member. </summary>
-    public static void EachMember(Action<Friend> cons)
-    {
-        foreach (var member in Lobby.Value.Members) cons(member);
-    }
-
-    /// <summary> Iterates each lobby member except its owner. </summary>
-    public static void EachMemberExceptOwner(Action<Friend> cons)
-    {
-        foreach (var member in Lobby.Value.Members)
-        {
-            // usually this method is used by the server to send packets, because it doesn't make sense to send packets to itself
-            if (member.Id != Lobby.Value.Owner.Id) cons(member);
-        }
-    }
-
-    /// <summary> Iterates each lobby member, except for its owner and one more SteamID. </summary>
-    public static void EachMemberExceptOwnerAnd(SteamId id, Action<Friend> cons)
-    {
-        foreach (var member in Lobby.Value.Members)
-        {
-            // usually this method is used by the server to forward packets from one of the clients
-            if (member.Id != Lobby.Value.Owner.Id && member.Id != id) cons(member);
-        }
     }
 
     #endregion
@@ -195,18 +146,14 @@ Maybe it was closed or you were blocked ,_,");
     public static void CopyCode()
     {
         GUIUtility.systemCopyBuffer = Lobby?.Id.ToString();
-        if (Lobby != null) UI.SendMsg(
-@"<size=20><color=#00FF00>The lobby code has been successfully copied to the clipboard!</color></size>
-Send it to your friends so they can join you :D");
+        if (Online) Bundle.Hud("lobby.copied");
     }
 
     /// <summary> Joins by the lobby code from the clipboard. </summary>
     public static void JoinByCode()
     {
         if (ulong.TryParse(GUIUtility.systemCopyBuffer, out var code)) JoinLobby(new(code));
-        else UI.SendMsg(
-@"<size=20><color=red>Could not find the lobby code on your clipboard!</color></size>
-Make sure it is copied without spaces :(");
+        else Bundle.Hud("lobby.failed");
     }
 
     #endregion
@@ -215,22 +162,20 @@ Make sure it is copied without spaces :(");
     /// <summary> Asynchronously fetches a list of public lobbies. </summary>
     public static void FetchLobbies(Action<Lobby[]> done)
     {
-        var task = SteamMatchmaking.LobbyList.RequestAsync();
         FetchingLobbies = true;
-
-        task.GetAwaiter().OnCompleted(() =>
+        SteamMatchmaking.LobbyList.RequestAsync().ContinueWith(task =>
         {
             FetchingLobbies = false;
-            done(task.Result);
+            done(task.Result.Where(l => l.Data.Any(p => p.Key == "jaket" || p.Key == "mk_lobby")).ToArray());
         });
     }
 
-    /// <summary> Maps the maps names so that they are more understandable to the average player. </summary>
+    /// <summary> Maps the map name so that it is more understandable to an average player. </summary>
     public static string MapMap(string map) => map switch
     {
         "Tutorial" => "Tutorial",
         "uk_construct" => "Sandbox",
-        "Endless" => "Myth",
+        "Endless" => "Cyber Grind",
         "CreditsMuseum2" => "Museum",
         _ => map.Substring("Level ".Length)
     };

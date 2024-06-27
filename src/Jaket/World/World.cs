@@ -1,5 +1,7 @@
 namespace Jaket.World;
 
+using HarmonyLib;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -7,221 +9,179 @@ using Jaket.Content;
 using Jaket.IO;
 using Jaket.Net;
 using Jaket.Net.Types;
-using Jaket.UI;
 
-/// <summary> Class that manages objects in the level, such as skull cases, rooms and etc. </summary>
-public class World : MonoSingleton<World>
+using Version = Version;
+
+/// <summary> Class that manages objects in the level, such as hook points, skull cases, triggers and etc. </summary>
+public class World
 {
-    /// <summary> List of all possible actions with the world. </summary>
+    /// <summary> List of most actions with the world. </summary>
     public static List<WorldAction> Actions = new();
-    /// <summary> List of activated actions, cleared only when the host loads a new level. </summary>
-    public List<byte> Activated = new();
+    /// <summary> List of activated actions. Cleared only when the host loads a new level. </summary>
+    public static List<byte> Activated = new();
 
-    /// <summary> There is no prefab for the mini-boss at levels 2-4. </summary>
-    public Hand Hand;
-    /// <summary> Level 5-4 contains a unique boss that needs to be dealt with separately. </summary>
-    public Leviathan Leviathan;
+    /// <summary> List of all hook points on the level. </summary>
+    public static List<HookPoint> HookPoints = new();
+    /// <summary> Last hook point, whose state was synchronized. </summary>
+    public static HookPoint LastSyncedPoint;
 
-    /// <summary> Creates a singleton of world & listener needed to keep track of objects at the level. </summary>
+    /// <summary> List of all tram controllers on the level. </summary>
+    public static List<TramControl> Trams = new();
+    /// <summary> Trolley with a teleport from the tunnel at level 7-1. </summary>
+    public static Transform TunnelRoomba;
+
+    public static Hand Hand;
+    public static Leviathan Leviathan;
+    public static Minotaur Minotaur;
+    public static SecuritySystem[] SecuritySystem = new SecuritySystem[7];
+    public static Brain Brain;
+
+    /// <summary> Creates a singleton of world. </summary>
     public static void Load()
     {
-        // initialize the singleton
-        UI.Object("World").AddComponent<World>();
-
+        Events.OnLoadingStarted += () =>
+        {
+            if (LobbyController.Online && LobbyController.IsOwner && Tools.Pending != "Main Menu")
+            {
+                Activated.Clear();
+                Networking.Send(PacketType.Level, WriteData);
+            }
+        };
         Events.OnLoaded += () =>
         {
-            foreach (var door in Resources.FindObjectsOfTypeAll<Door>())
-            {
-                if (door.gameObject.scene == null) return;
-                foreach (var room in door.deactivatedRooms) RoomController.Build(room.transform);
-            }
-
-            // change the layer from PlayerOnly to Invisible so that other players can also launch a wave
-            foreach (var trigger in Resources.FindObjectsOfTypeAll<ActivateArena>())
-                trigger.gameObject.layer = 16;
-
-            if (LobbyController.Lobby != null) Instance.Restore();
+            if (LobbyController.Online) Restore();
         };
-        Events.OnLobbyEntered += Instance.Restore;
-
-        // create world actions to synchronize different things in the level
-        Actions.AddRange(new WorldAction[]
-        {
-            // duplicate torches at levels 4-3 and P-1
-            StaticAction.PlaceTorches("Level 4-3", new(0f, -10f, 310f), 3f),
-            StaticAction.PlaceTorches("Level P-1", new(-0.84f, -10f, 16.4f), 2f),
-
-            // launching the Minos boss fight unloads some of the locations, which is undesirable
-            StaticAction.Find("Level 2-4", "DoorsActivator", new(425f, -10f, 650f), obj =>
-            {
-                var objs = obj.GetComponent<ObjectActivator>().events.toDisActivateObjects;
-                objs[1] = objs[2] = null;
-            }),
-            // for some reason this object cannot be found located
-            StaticAction.Find("Level 5-2", "6 (Secret)", new(-3.5f, -3f, 940.5f), obj =>
-            {
-                Destroy(obj.transform.Find("Altar (Blue Skull) Variant").GetChild(0).gameObject);
-            }),
-            // fix the red altar at the very beggining of the level
-            StaticAction.Find("Level 7-1", "Cube", new(0f, 3.4f, 582.5f), obj => obj.transform.position = new(0f, 7.4f, 582.5f)),
-            // disable door blocker
-            StaticAction.Find("Level P-1", "Trigger", new(360f, -568.5f, 110f), obj =>
-            {
-                obj.GetComponent<ObjectActivator>().events.toActivateObjects[4] = null;
-            }),
-            // move the death zone, because entities spawn at the origin
-            StaticAction.Find("Endless", "Cube", new(-40f, 0.5f, 102.5f), obj => obj.transform.position = new(-40f, -10f, 102.5f)),
-
-            // enable arenas that are disabled by default
-            StaticAction.Enable("Level 4-2", "6A - Indoor Garden", new(-19f, 35f, 953.9481f)),
-            StaticAction.Enable("Level 4-2", "6B - Outdoor Arena", new(35f, 35f, 954f)),
-
-            // destroy objects in any way interfering with multiplayer
-            StaticAction.Destroy("Level 2-3", "4 & 5 Fake", new(-26f, 12.5f, 375f)),
-            StaticAction.Destroy("Level 2-4", "Doorway Blockers", new(425f, -10f, 650f)),
-            StaticAction.Destroy("Level 2-4", "MetroBlockDoor (1)", new(425f, 27f, 615f)),
-            StaticAction.Destroy("Level 2-4", "MetroBlockDoor (2)", new(425f, 27f, 525f)),
-            StaticAction.Destroy("Level 4-2", "6A Activator", new(-79f, 45f, 954f)),
-            StaticAction.Destroy("Level 4-2", "6B Activator", new(116f, 19.5f, 954f)),
-            StaticAction.Destroy("Level 5-1", "HudMessage", new(0f, -100f, 295.5f)),
-            StaticAction.Destroy("Level 5-1", "Door", new(218.5f, -41f, 234.5f)),
-            StaticAction.Destroy("Level 5-2", "Arena 1", new(87.5f, -53f, 1240f)),
-            StaticAction.Destroy("Level 5-2", "Arena 2", new(87.5f, -53f, 1240f)),
-            StaticAction.Destroy("Level 6-1", "Cage", new(168.5f, -130f, 140f)),
-            StaticAction.Destroy("Level 6-1", "Cube", new(102f, -165f, -503f)),
-            StaticAction.Destroy("Level 7-1", "SkullRed", new(-66.25f, 9.8f, 485f)),
-            StaticAction.Destroy("Level 7-1", "ViolenceArenaDoor", new(-120f, 0f, 530.5f)),
-            StaticAction.Destroy("Level 7-1", "Walkway Arena -> Stairway Up", new(80f, -25f, 590f)),
-            StaticAction.Destroy("Level 7-4", "ArenaWalls", new(-26.5f, 470f, 763.75f)),
-
-            // there are just a couple of little things that need to be synchronized
-            NetAction.Sync("Level 4-2", "DoorOpeners", new(-1.5f, -18f, 774.5f)),
-            NetAction.Sync("Level 4-2", "DoorsOpener", new(40f, 5f, 813.5f)),
-
-            // there is a door in the arena through which V2 escapes and you also need to synchronize the outro and the exit building
-            NetAction.Sync("Level 4-4", "Checkpoint Activator", new(177.5f, 663.5f, 243f), obj =>
-            {
-                obj.transform.parent.gameObject.SetActive(true);
-                obj.transform.parent.parent.Find("Wall").gameObject.SetActive(false);
-            }),
-            NetAction.Sync("Level 4-4", "BossOutro", new(117.5f, 663.5f, 323f)),
-            NetAction.Sync("Level 4-4", "ExitBuilding Raise", new(1027f, 261f, 202.5f), obj =>
-            {
-                obj.SetActive(true);
-
-                var exit = obj.transform.parent.Find("ExitBuilding");
-                exit.GetComponent<Door>().Close();
-                exit.Find("GrapplePoint (2)").gameObject.SetActive(true);
-            }),
-
-            // there is a checkpoint deactivator, the deactivation of which needs to be synchronized, and some metro doors
-            NetAction.Sync("Level 5-1", "CheckPointsUndisabler", new(0f, -50f, 350f)),
-            NetAction.Sync("Level 5-1", "DelayedActivator", new(-15f, 36f, 698f)),
-            NetAction.Sync("Level 5-1", "DelayedActivator", new(-15f, 38f, 778f)),
-
-            // Minos & Sisyphus have unique cutscenes and non-functional level exits
-            NetAction.Sync("Level P-1", "MinosPrimeIntro", new(405f, -598.5f, 110f)),
-            NetAction.Sync("Level P-1", "End", new(405f, -598.5f, 110f), obj =>
-            {
-                obj.SetActive(true);
-                obj.transform.parent.Find("Cube (2)").gameObject.SetActive(false);
-
-                GameObject.Find("Music 3").SetActive(false);
-                obj.transform.parent.Find("Lights").gameObject.SetActive(false);
-
-                StatsManager.Instance.StopTimer();
-            }),
-            NetAction.Sync("Level P-2", "PrimeIntro", new(-102f, -61.25f, -450f)),
-            NetAction.Sync("Level P-2", "Outro", new(-102f, -61.25f, -450f), obj =>
-            {
-                obj.SetActive(true);
-                obj.transform.parent.Find("Backwall").gameObject.SetActive(false);
-
-                GameObject.Find("BossMusics/Sisyphus").SetActive(false);
-                GameObject.Find("IntroObjects/Decorations").SetActive(false);
-                GameObject.Find("Rain").SetActive(false);
-
-                StatsManager.Instance.StopTimer();
-            }),
-        });
+        Events.OnLobbyEntered += Restore;
+        Events.EveryDozen += Optimize;
     }
 
     #region data
 
-    /// <summary> Writes data about the world such as level, difficulty and, in the future, triggers fired. </summary>
-    public void WriteData(Writer w)
+    /// <summary> Writes data about the world such as level, difficulty and triggers fired. </summary>
+    public static void WriteData(Writer w)
     {
-        w.String(SceneHelper.CurrentScene);
+        w.String(Tools.Pending != null ? Tools.Pending : Tools.Scene);
 
-        // the version is needed for a warning about incompatibility, and the difficulty is mainly needed for ultrapain
+        // the version is needed for a warning about incompatibility
         w.String(Version.CURRENT);
         w.Byte((byte)PrefsManager.Instance.GetInt("difficulty"));
-
-        // synchronize the Ultrapain difficulty
-        w.Bool(Plugin.UltrapainLoaded);
-        if (Plugin.UltrapainLoaded) Plugin.WritePain(w);
 
         // synchronize activated actions
         w.Bytes(Activated.ToArray());
     }
 
-    /// <summary> Reads data about the world: loads the level, sets difficulty and, in the future, fires triggers. </summary>
-    public void ReadData(Reader r)
+    /// <summary> Reads data about the world: loads the level, sets difficulty and fires triggers. </summary>
+    public static void ReadData(Reader r)
     {
-        // reset all of the activated actions
-        Activated.Clear();
-        // load the host level, it is the main function of this packet
-        SceneHelper.LoadScene(r.String());
+        Tools.Load(r.String());
 
         // if the mod version doesn't match the host's one, then reading the packet is complete, as this may lead to bigger bugs
         if (r.String() != Version.CURRENT)
         {
-            Version.NotifyHost();
+            Version.Notify();
             return;
         }
         PrefsManager.Instance.SetInt("difficulty", r.Byte());
 
-        if (r.Bool())
-        {
-            // synchronize different values needed for Ultrapain to work
-            if (Plugin.UltrapainLoaded) Plugin.TogglePain(r.Bool(), r.Bool());
-            // or skip the values if the mod isn't installed locally
-            else r.Inc(2);
-        }
-
+        Activated.Clear();
         Activated.AddRange(r.Bytes(r.Length - r.Position));
     }
 
     #endregion
     #region iteration
 
-    /// <summary> Iterates each world action and restores it as needed. </summary>
-    public void Restore()
-    {
-        EachStatic(sa => sa.Run());
-        Activated.ForEach(index => Actions[index].Run());
-    }
-
     /// <summary> Iterates each static world action. </summary>
-    public static void EachStatic(System.Action<StaticAction> cons) => Actions.ForEach(action =>
+    public static void EachStatic(Action<StaticAction> cons) => Actions.ForEach(action =>
     {
         if (action is StaticAction sa) cons(sa);
     });
 
     /// <summary> Iterates each net world action. </summary>
-    public static void EachNet(System.Action<NetAction> cons) => Actions.ForEach(action =>
+    public static void EachNet(Action<NetAction> cons) => Actions.ForEach(action =>
     {
         if (action is NetAction sa) cons(sa);
     });
 
     #endregion
+    #region general
+
+    /// <summary> Restores activated actions after restart of the level. </summary>
+    public static void Restore()
+    {
+        Events.Post(() =>
+        {
+            EachStatic(sa => sa.Run());
+            Activated.ForEach(index => Actions[index].Run());
+        });
+
+        // change the layer from PlayerOnly to Invisible so that other players will be able to launch the wave
+        foreach (var trigger in Tools.ResFind<ActivateArena>()) trigger.gameObject.layer = 16;
+
+        // raise the activation trigger so that players don't get stuck on the sides
+        var act = Tools.ObjFind<PlayerActivator>();
+        if (act) act.transform.position += Vector3.up * 6f;
+
+        #region trams
+
+        void Find<T>(List<T> list) where T : Component
+        {
+            list.Clear();
+            Tools.ResFind<T>(Tools.IsReal, list.Add);
+
+            // sort the objects by the distance so that their order will be the same for all clients
+            list.Sort((t1, t2) => t1.transform.position.sqrMagnitude.CompareTo(t2.transform.position.sqrMagnitude));
+        }
+        Find(Trams);
+
+        #endregion
+        #region hook points
+
+        void Sync(HookPoint point, bool hooked)
+        {
+            var index = (byte)HookPoints.IndexOf(point);
+            if (index != 255 && point != LastSyncedPoint && Tools.Within(point.transform, HookArm.Instance.hook.position, 9f)) SyncAction(index, hooked);
+        }
+
+        Find(HookPoints);
+        HookPoints.ForEach(p =>
+        {
+            p.onHook.onActivate.AddListener(() => Sync(p, true));
+            p.onUnhook.onActivate.AddListener(() => Sync(p, false));
+        });
+
+        #endregion
+    }
+
+    /// <summary> Optimizes the level by destroying the corpses of enemies. </summary>
+    public static void Optimize()
+    {
+        if (LobbyController.Offline) return;
+
+        bool cg = Tools.Scene == "Endless";
+        bool FarEnough(Transform t) => !Tools.Within(t, NewMovement.Instance.transform, 100f) || cg;
+
+        // clear gore zones located further than 100 units from the player
+        Tools.ResFind<GoreZone>(zone => Tools.IsReal(zone) && zone.isActiveAndEnabled && FarEnough(zone.transform), zone => zone.ResetGibs());
+
+        // big pieces of corpses, such as arms or legs, are part of the entities
+        Networking.Entities.Values.DoIf(entity =>
+
+                entity && entity.Dead && entity is Enemy &&
+                entity.Type != EntityType.MaliciousFace &&
+                entity.Type != EntityType.Gutterman &&
+                entity.LastUpdate < Time.time - 1f &&
+                FarEnough(entity.transform),
+
+        entity => entity.gameObject.SetActive(false));
+    }
+
+    #endregion
     #region networking
 
-    /// <summary> Reads the world action and activates it. </summary>
-    public void ReadAction(Reader r)
+    /// <summary> Reads an action with the remote world and applies it to the local one. </summary>
+    public static void ReadAction(Reader r)
     {
-        void Find<T>(Vector3 pos, System.Action<T> cons) where T : Component
-        { foreach (var door in Resources.FindObjectsOfTypeAll<T>()) if (door.transform.position == pos) cons(door); }
+        void Find<T>(Vector3 pos, Action<T> cons) where T : Component => Tools.ResFind(t => t.transform.position == pos, cons);
 
         switch (r.Byte())
         {
@@ -229,34 +189,100 @@ public class World : MonoSingleton<World>
                 byte index = r.Byte();
                 if (Actions[index] is NetAction na)
                 {
+                    Log.Debug($"[World] Read the activation of the object {na.Name} in {na.Level}");
                     Activated.Add(index);
                     na.Run();
                 }
                 break;
 
-            case 1: Find<FinalDoor>(r.Vector(), d => d.transform.Find("FinalDoorOpener").gameObject.SetActive(true)); break;
-            case 2: Find<Door>(r.Vector(), d => d.Open()); break;
+            case 1:
+                byte indexp = r.Byte();
+                bool hooked = r.Bool();
+                Log.Debug($"[World] Read the new state of point#{indexp}: {hooked}");
+
+                LastSyncedPoint = HookPoints[indexp];
+                if (hooked)
+                    LastSyncedPoint.Hooked();
+                else
+                {
+                    LastSyncedPoint.Unhooked();
+                    if (LastSyncedPoint.type == hookPointType.Switch) LastSyncedPoint.SwitchPulled();
+                }
+                break;
+
+            case 2:
+                byte indext = r.Byte();
+                int speed = r.Int();
+                Log.Debug($"[World] Read the new speed of tram#{indext}: {speed}");
+
+                Trams[indext].currentSpeedStep = speed;
+                break;
+
+            case 3: Find<FinalDoor>(r.Vector(), d => d.transform.Find("FinalDoorOpener").gameObject.SetActive(true)); break;
+            case 4: Find<Door>(r.Vector(), d => d.Open()); break;
+
+            case 5:
+                Find<StatueActivator>(r.Vector(), d =>
+                {
+                    d.gameObject.SetActive(true);
+                    d.transform.parent.gameObject.SetActive(true);
+                });
+                break;
+            case 6:
+                Networking.EachEntity(entity => entity.Type == EntityType.Puppet, entity => entity.EnemyId.InstaKill());
+                Find<BloodFiller>(r.Vector(), f => f.InstaFill());
+                break;
         }
     }
 
-    /// <summary> Synchronizes network action activation. </summary>
-    public static void SyncActivation(NetAction action) => Networking.Send(PacketType.ActivateObject, w =>
+    /// <summary> Synchronizes activations of the given game object. </summary>
+    public static void SyncAction(GameObject obj) => EachNet(na =>
     {
-        byte index = (byte)Actions.IndexOf(action);
-        if (index != 0xFF)
+        if (!Tools.Within(obj, na.Position) || obj.name != na.Name) return;
+
+        var index = (byte)Actions.IndexOf(na);
+        if (LobbyController.IsOwner || !Activated.Contains(index))
+            Networking.Send(PacketType.ActivateObject, w =>
+            {
+                Activated.Add(index);
+                w.Byte(0);
+                w.Byte(index);
+
+                Log.Debug($"[World] Sent the activation of the object {na.Name} in {na.Level}");
+            }, size: 2);
+    });
+
+    /// <summary> Synchronizes the state of a hook point. </summary>
+    public static void SyncAction(byte index, bool hooked) => Networking.Send(PacketType.ActivateObject, w =>
+    {
+        w.Byte(1);
+        w.Byte(index);
+        w.Bool(hooked);
+
+        Log.Debug($"[World] Sent the new state of point#{index}: {hooked}");
+    }, size: 3);
+
+    /// <summary> Synchronizes the tram speed. </summary>
+    public static void SyncTram(TramControl tram)
+    {
+        if (LobbyController.Offline || Tools.Scene == "Level 7-1") return;
+
+        var index = (byte)Trams.IndexOf(tram);
+        if (index != 255) Networking.Send(PacketType.ActivateObject, w =>
         {
-            Instance.Activated.Add(index);
-            w.Byte(0);
+            w.Byte(2);
             w.Byte(index);
-        }
-    }, size: 2);
+            w.Int(tram.currentSpeedStep);
 
+            Log.Debug($"[World] Sent the new speed of tram#{index} {tram.currentSpeedStep}");
+        }, size: 6);
+    }
 
-    /// <summary> Synchronizes final door or skull case state. </summary>
-    public static void SyncOpening(Component door, bool final = true) => Networking.Send(PacketType.ActivateObject, w =>
+    /// <summary> Synchronizes actions characterized only by position: opening doors, activation of a stature or tree. </summary>
+    public static void SyncAction(Component t, byte type) => Networking.Send(PacketType.ActivateObject, w =>
     {
-        w.Byte((byte)(final ? 1 : 2));
-        w.Vector(door.transform.position);
+        w.Byte(type);
+        w.Vector(t.transform.position);
     }, size: 13);
 
     #endregion

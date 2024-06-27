@@ -12,7 +12,7 @@ using Jaket.Net.Types;
 public class GunsPatch
 {
     [HarmonyPostfix]
-    [HarmonyPatch(typeof(GunControl), nameof(GunControl.SwitchWeapon), typeof(int), typeof(List<GameObject>), typeof(bool), typeof(bool), typeof(bool))]
+    [HarmonyPatch(typeof(GunControl), nameof(GunControl.SwitchWeapon), typeof(int), typeof(List<GameObject>), typeof(bool), typeof(bool), typeof(bool), typeof(bool))]
     static void GunSwitch() => Events.OnWeaponChanged.Fire();
 
     [HarmonyPostfix]
@@ -31,39 +31,29 @@ public class GunsPatch
 [HarmonyPatch]
 public class ArmsPatch
 {
+    static LocalPlayer lp => Networking.LocalPlayer;
+
     [HarmonyPostfix]
     [HarmonyPatch(typeof(Punch), "ActiveStart")]
     static void Puncn()
     {
-        if (LobbyController.Lobby == null) return;
+        if (LobbyController.Offline) return;
 
-        foreach (var harpoon in NewMovement.Instance.GetComponentsInChildren<Harpoon>())
-        {
-            Bullets.Punch(harpoon);
-            harpoon.name = "Punched";
-        }
-
-        Networking.Send(PacketType.Punch, w =>
-        {
-            w.Id(Networking.LocalPlayer.Id);
-            w.Byte(0);
-
-            w.Bool(Networking.LocalPlayer.Parried);
-            Networking.LocalPlayer.Parried = false;
-        }, size: 10);
+        foreach (var harpoon in NewMovement.Instance.GetComponentsInChildren<Harpoon>()) Bullets.Punch(harpoon, true);
+        Bullets.SyncPunch();
     }
 
     [HarmonyPrefix]
     [HarmonyPatch(typeof(Punch), nameof(Punch.GetParryLookTarget))]
-    static void Parry() => Networking.LocalPlayer.Parried = true;
+    static void Parry() => lp.Parried = true;
 
     [HarmonyPrefix]
     [HarmonyPatch(typeof(HookArm), "Update")]
-    static void Hook(ref bool ___lightTarget, bool ___forcingFistControl, Vector3 ___hookPoint)
+    static void Hook(HookArm __instance, bool ___forcingFistControl, Vector3 ___hookPoint, bool ___lightTarget, EnemyIdentifier ___caughtEid)
     {
-        if (LobbyController.Lobby == null) return;
+        if (LobbyController.Offline) return;
 
-        if (!LobbyController.IsOwner) ___lightTarget = false; // clients should be pulled to all enemies
-        Networking.LocalPlayer.Hook = ___forcingFistControl ? ___hookPoint : Vector3.zero;
+        lp.Hook = ___forcingFistControl ? ___hookPoint : Vector3.zero;
+        if (__instance.state == HookState.Pulling && ___lightTarget && ___caughtEid.name == "Net") ___caughtEid.GetComponent<Enemy>()?.TakeOwnage();
     }
 }

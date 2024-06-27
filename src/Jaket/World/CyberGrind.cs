@@ -1,6 +1,5 @@
 ﻿namespace Jaket.World;
 
-using HarmonyLib;
 using UnityEngine;
 
 using Jaket.Content;
@@ -10,8 +9,8 @@ using Jaket.Net;
 /// <summary> Class responsible for Cyber Grind synchronization. </summary>
 public class CyberGrind
 {
-    private static EndlessGrid grid => EndlessGrid.Instance;
-    private static NewMovement nm => NewMovement.Instance;
+    static EndlessGrid grid => EndlessGrid.Instance;
+    static NewMovement nm => NewMovement.Instance;
 
     /// <summary> Current wave number used for display on the Huge Flying Panel™. </summary>
     public static int CurrentWave;
@@ -50,14 +49,14 @@ public class CyberGrind
     public static void LoadPattern(ArenaPattern pattern)
     {
         // start a new wave with the synced pattern
-        AccessTools.Method(typeof(EndlessGrid), "NextWave").Invoke(grid, new object[] { });
+        Tools.Invoke("NextWave", grid);
 
         // do not reset any value if it is the first load
         var col = grid.GetComponent<Collider>();
         if (col.enabled)
         {
             col.enabled = false; // start the timer and the music
-            GameObject.Find("Everything").transform.Find("Timer").gameObject.SetActive(true);
+            Tools.ObjFind("Everything").transform.Find("Timer").gameObject.SetActive(true);
             return;
         }
 
